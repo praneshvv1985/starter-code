@@ -15,6 +15,7 @@ import uuid
 
 imageSourceUrl = 'https://' + app.config['BLOB_ACCOUNT'] + '.blob.core.windows.net/' + app.config['BLOB_CONTAINER'] + '/'
 
+
 @app.route('/')
 @app.route('/home')
 @login_required
@@ -26,6 +27,7 @@ def home():
         title='Home Page',
         posts=posts
     )
+
 
 @app.route('/new_post', methods=['GET', 'POST'])
 @login_required
@@ -42,6 +44,7 @@ def new_post():
         form=form
     )
 
+
 @app.route('/post/<int:id>', methods=['GET', 'POST'])
 @login_required
 def post(id):
@@ -57,6 +60,7 @@ def post(id):
         form=form
     )
 
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if current_user.is_authenticated:
@@ -65,11 +69,23 @@ def login():
     form = LoginForm()
     if form.validate_on_submit():
         user = User.query.filter_by(username=form.username.data).first()
+
         if user is None or not user.check_password(form.password.data):
+            app.logger.warning(
+                'Invalid login attempt for username: %s from IP: %s',
+                form.username.data,
+                request.remote_addr
+            )
             flash('Invalid username or password')
             return redirect(url_for('login'))
 
         login_user(user, remember=form.remember_me.data)
+        app.logger.info(
+            'User logged in successfully: %s from IP: %s',
+            user.username,
+            request.remote_addr
+        )
+
         next_page = request.args.get('next')
         if not next_page or url_parse(next_page).netloc != '':
             next_page = url_for('home')
@@ -79,12 +95,22 @@ def login():
     auth_url = _build_auth_url(scopes=Config.SCOPE, state=session["state"])
     return render_template('login.html', title='Sign In', form=form, auth_url=auth_url)
 
+
 @app.route(Config.REDIRECT_PATH)
 def authorized():
     if request.args.get('state') != session.get("state"):
+        app.logger.warning(
+            'Microsoft login failed due to invalid state from IP: %s',
+            request.remote_addr
+        )
         return redirect(url_for("home"))
 
     if "error" in request.args:
+        app.logger.warning(
+            'Microsoft login error: %s from IP: %s',
+            request.args.get("error"),
+            request.remote_addr
+        )
         return render_template("auth_error.html", result=request.args)
 
     if request.args.get('code'):
@@ -96,7 +122,11 @@ def authorized():
             redirect_uri=url_for('authorized', _external=True)
         )
 
-        if "error" in result:
+        if not result or "error" in result:
+            app.logger.warning(
+                'Microsoft login unsuccessful from IP: %s',
+                request.remote_addr
+            )
             return render_template("auth_error.html", result=result)
 
         session["user"] = result.get("id_token_claims")
@@ -104,20 +134,36 @@ def authorized():
         user = User.query.filter_by(username="admin").first()
         login_user(user)
 
+        app.logger.info(
+            'Microsoft login successful. Logged in as admin from IP: %s',
+            request.remote_addr
+        )
+
         _save_cache(cache)
 
     return redirect(url_for('home'))
 
+
 @app.route('/logout')
 def logout():
+    if current_user.is_authenticated:
+        app.logger.info(
+            'User logged out: %s from IP: %s',
+            current_user.username,
+            request.remote_addr
+        )
+
     logout_user()
+
     if session.get("user"):
         session.clear()
         return redirect(
             Config.AUTHORITY + "/oauth2/v2.0/logout" +
             "?post_logout_redirect_uri=" + url_for("login", _external=True)
         )
+
     return redirect(url_for('login'))
+
 
 def _load_cache():
     cache = msal.SerializableTokenCache()
@@ -125,9 +171,11 @@ def _load_cache():
         cache.deserialize(session["token_cache"])
     return cache
 
+
 def _save_cache(cache):
     if cache and cache.has_state_changed:
         session["token_cache"] = cache.serialize()
+
 
 def _build_msal_app(cache=None, authority=None):
     return msal.ConfidentialClientApplication(
@@ -136,6 +184,7 @@ def _build_msal_app(cache=None, authority=None):
         client_credential=Config.CLIENT_SECRET,
         token_cache=cache
     )
+
 
 def _build_auth_url(authority=None, scopes=None, state=None):
     return _build_msal_app(authority=authority).get_authorization_request_url(
